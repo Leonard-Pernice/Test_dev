@@ -1,5 +1,5 @@
 import torch, queue
-from torch.utils.data.sampler import SequentialSampler, RandomSampler, BatchSampler
+from torch.utils.data.sampler import SequentialSampler, RandomSampler, BatchSampler, WeightedRandomSampler
 from .imports import *
 from .core import *
 import collections,sys,traceback,threading
@@ -24,7 +24,7 @@ def get_tensor(batch, pin, half=False):
 
 class DataLoader(object):
     def __init__(self, dataset, batch_size=1, shuffle=False, sampler=None, batch_sampler=None, pad_idx=0,
-                 num_workers=None, pin_memory=False, drop_last=False, pre_pad=True, half=False,
+                 num_workers=None, pin_memory=False, drop_last=False, pre_pad=True, half=False, weights=None,
                  transpose=False, transpose_y=False):
         self.dataset, self.batch_size, self.num_workers = dataset, batch_size, num_workers
         self.pin_memory, self.drop_last, self.pre_pad = pin_memory, drop_last, pre_pad
@@ -39,18 +39,33 @@ class DataLoader(object):
             raise ValueError('sampler is mutually exclusive with shuffle')
 
         if batch_sampler is None:
+
             if sampler is None:
                 sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
+            if weights is not None:  # (!)
+                sampler = WeightedRandomSampler(weights, len(weights))
             batch_sampler = BatchSampler(sampler, batch_size, drop_last)
 
         if num_workers is None:
             self.num_workers = num_cpus()
 
+        self.batch_size = batch_size  # (!)
+        self.drop_last = drop_last  # (!)
         self.sampler = sampler
         self.batch_sampler = batch_sampler
 
     def __len__(self):
         return len(self.batch_sampler)
+
+    def reset_sampler(self):
+        self.sampler = RandomSampler(self.dataset)
+        self.batch_sampler = BatchSampler(self.sampler, self.batch_size, self.drop_last)
+
+    def set_dynamic_sampler(self, weights, batch_size=None):  # (!)
+        batch_size = batch_size if batch_size is not None else self.batch_size
+        self.sampler = WeightedRandomSampler(weights, len(weights))
+        self.batch_sampler = BatchSampler(self.sampler, batch_size, self.drop_last)
+
 
     def jag_stack(self, b):
         if len(b[0].shape) not in (1, 2): return np.stack(b)
@@ -86,7 +101,7 @@ class DataLoader(object):
 
     def __iter__(self):
         if self.num_workers == 0:
-            for batch in map(self.get_batch, iter(self.batch_sampler)):
+            for batch in map(self.get_batch, iter(self.batch_sampler)):  # (!) map(self.get_batch, iter(self.)); we need a dynamic weights varibale passed in
                 yield get_tensor(batch, self.pin_memory, self.half)
         else:
             with ThreadPoolExecutor(max_workers=self.num_workers) as e:

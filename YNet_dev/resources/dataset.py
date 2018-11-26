@@ -1,13 +1,18 @@
 import csv
+
 from .imports import *
 from .torch_imports import *
 from .core import *
 from .transforms import *
 from .layer_optimizer import *
 from .dataloader import DataLoader
+from collections import Counter
 
 # (!) added imports to allow open_image to function with skimage.io.imread(), file-extension agnostic.
 from skimage.external import tifffile
+# (!) added for debug
+import matplotlib.pyplot as plt
+
 
 
 def get_cv_idxs(n, cv_idx=0, val_pct=0.2, seed=42):
@@ -104,10 +109,16 @@ def folder_source(path, folder, d):
     lbl_arr: a numpy array of the label indices in `all_lbls`
     """
     fnames, lbls, all_lbls = read_dirs(path, folder)
-    for idx, label in enumerate(all_lbls):
-        d[label] = idx
-
+    # print(path, d)
+    
+    if d == {}:
+        for idx, label in enumerate(all_lbls):
+            d[label] = idx
     idxs = [d[lbl] for lbl in lbls]
+    
+    # temp = [idxs.index(i) for i in range(len(all_lbls))]
+    # for ii in temp: print(f"{idxs[ii]} maps to {fnames[ii]}")
+    
     lbl_arr = np.array(idxs, dtype=int)
     return fnames, lbl_arr, all_lbls
 
@@ -294,8 +305,7 @@ class FilesDataset(BaseDataset):
 
 
         if len(arr.shape) == 3: arr = arr[None]
-        return self.transform.denorm(np.rollaxis(arr, 1, 4),
-                                     y)  ##(!) Get's called in plt.imshow.(data.trn_ds.denorm(x)[0]) which delegates to tranforms.denormalize through tfms_from_stats. Makes indexing confusing!
+        return self.transform.denorm(np.rollaxis(arr, 1, 4), y)  ##(!) Get's called in plt.imshow.(data.trn_ds.denorm(x)[0]) which delegates to tranforms.denormalize through tfms_from_stats. Makes indexing confusing!
 
 
 class FilesArrayDataset(FilesDataset):
@@ -384,19 +394,19 @@ class ModelData():
 
 
 class ImageData(ModelData):
-    def __init__(self, path, datasets, bs, num_workers, classes):
+    def __init__(self, path, datasets, bs, num_workers, classes, balance=None): # (!) balance
         trn_ds, val_ds, fix_ds, aug_ds, test_ds, test_aug_ds = datasets
         self.path, self.bs, self.num_workers, self.classes = path, bs, num_workers, classes
         self.trn_dl, self.val_dl, self.fix_dl, self.aug_dl, self.test_dl, self.test_aug_dl = [
-            self.get_dl(ds, shuf) for ds, shuf in [
-                (trn_ds, True), (val_ds, False), (fix_ds, False), (aug_ds, False),
-                (test_ds, False), (test_aug_ds, False)
+            self.get_dl(ds, shuf, weights) for ds, shuf, weights in [ # (!) weights
+                (trn_ds, True, balance), (val_ds, False, None), (fix_ds, False, None), (aug_ds, False,None),
+                (test_ds, False, None), (test_aug_ds, False, None)
             ]
         ]
 
-    def get_dl(self, ds, shuffle):
+    def get_dl(self, ds, shuffle, weights):
         if ds is None: return None
-        return DataLoader(ds, batch_size=self.bs, shuffle=shuffle,
+        return DataLoader(ds, batch_size=self.bs, shuffle=shuffle, weights=weights,
                           num_workers=self.num_workers, pin_memory=False)
 
     @property
@@ -441,7 +451,7 @@ class ImageData(ModelData):
             else:
                 test_lbls = np.zeros((len(test), 1))
             res += [
-                fn(test, test_lbls, tfms[1], **kwargs),  # test
+                fn(test, test_lbls, tfms[2], **kwargs),  # test (!) 1 -> 2
                 fn(test, test_lbls, tfms[0], **kwargs)  # test_aug
             ]
         else:
@@ -472,9 +482,9 @@ class ImageClassifierData(ImageData):
         return cls(path, datasets, bs, num_workers, classes=classes)
 
     @classmethod
-
+    
     def prepare_from_path(cls, path, bs=64, trn_name='train', val_name='valid', test_name=None, test_with_labels=False,
-                          num_workers=8):
+                          num_workers=8,balance=False):
         """ Read in images and their labels given as sub-folder names
 
         Arguments:
@@ -490,17 +500,23 @@ class ImageClassifierData(ImageData):
             ImageClassifierData
         """
         lbl2index = {}  # gets populated in the folder  source calls
+        test_lbl2index = {}
+
         trn, val = [folder_source(path, o, lbl2index) for o in (trn_name, val_name)]
+        if balance:
+            weights = compute_adjusted_weights(trn)
+        else:
+            weights = None
+
         if test_name:
-            test = folder_source(path, test_name, lbl2index) if test_with_labels else read_dir(path, test_name)
+            test = folder_source(path, test_name, test_lbl2index) if test_with_labels else read_dir(path, test_name)
         else:
             test = None
-
         def create(tfms):
             datasets = cls.get_ds(FilesIndexArrayDataset, trn, val, tfms, path=path, test=test)
-            return cls(path, datasets, bs, num_workers, classes=trn[2])
+            return cls(path, datasets, bs, num_workers, classes=trn[2], balance=weights)
 
-        return create, lbl2index
+        return create, lbl2index, test_lbl2index
 
     @classmethod
     def from_csv(cls, path, folder, csv_fname, bs=64, tfms=(None, None),
@@ -565,3 +581,71 @@ def split_by_idx(idxs, *a):
     mask = np.zeros(len(a[0]), dtype=bool)
     mask[np.array(idxs)] = True
     return [(o[mask], o[~mask]) for o in a]
+
+
+def compute_default_weights(dataset):
+    """
+    :param dataset: dataset[0]: samples and names e.g. generic_filename; dataset[1] labels e.g. 0 or 1
+    :return: set of weights/probabilities for each sample; represents how often it is picked
+    """
+    weights = np.zeros(len(dataset[1]))
+    labels = list(set(dataset[1]))
+    occurrences = np.bincount(dataset[1])
+    probs = [100 * count/sum(occurrences) for count in occurrences]
+
+    for idx, label in enumerate(labels):
+        weights[dataset[1] == label] = probs[idx] / occurrences[idx]
+
+    return weights
+
+
+def compute_adjusted_weights(dataset):
+    """
+    :param dataset: dataset[0]: samples and names e.g. generic_filename; dataset[1] labels e.g. 0 or 1
+    :return: set of weights/probabilities for each sample; represents how often it is picked
+    """
+    weights = np.zeros(len(dataset[1]))
+    labels = list(set(dataset[1]))
+    occurrences = np.bincount(dataset[1])
+    probs = [100 * count/sum(occurrences) for count in occurrences]
+
+    for idx, label in enumerate(labels):
+        weights[dataset[1] == label] = probs[idx] / occurrences[idx]
+    desired = 100 / len(labels) # desired probability per class
+
+    for idx, prob in enumerate(probs):
+        delta = desired - prob # unlikely to be 0
+        correction = delta / occurrences[idx]
+        weights[dataset[1] == labels[idx]] += correction
+
+    return weights
+
+
+def balance_ds(dataset):
+    """
+    :param dataset: 0: train filenames, 1: labels as indexes, classes
+    :return:
+    """
+    counter = Counter(dataset[1]) # count how many of each label in the dataset
+    print("BEFORE: ", counter)
+
+    # for efficiency purposes
+    dataset = list(dataset)
+    dataset[1] = list(dataset[1])
+
+    max_label, max_count = counter.most_common(1)[0]
+    for label in set(dataset[1]):
+        if label != max_label:
+            delta = max_count - counter[label]
+            additions = np.random.choice(dataset[0], delta, replace=False)
+            labels = [label] * delta
+            dataset[0].extend(additions)
+            dataset[1].extend(labels)
+
+    # conversion back to the old types
+    dataset[1] = np.array(dataset[1])
+    dataset = tuple(dataset)
+
+    counter = Counter(dataset[1])  # count how many of each label in the dataset after the adjustment
+    print("AFTER: ", counter)
+    return dataset

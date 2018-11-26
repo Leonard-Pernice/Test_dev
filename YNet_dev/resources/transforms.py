@@ -180,7 +180,7 @@ class DenormalizeWithDict:
         return t(x), y
 
 
-class Denormalize():
+class Denormalize:
     """ De-normalizes an image, returning it to original format.
     """
     def __init__(self, stats):
@@ -199,7 +199,7 @@ class Denormalize():
             m,s = self.m, self.s
         return x*s+m
 
-class Normalize():
+class Normalize:
     """ Normalizes an image to zero mean and unit standard deviation, given the mean m and std s of the original image """
 
     def __init__(self, stats, tfm_y=TfmType.NO):
@@ -207,8 +207,8 @@ class Normalize():
             self.d = stats
         else:
             m, s = stats
-            self.m=np.array(m, dtype=np.float32)
-            self.s=np.array(s, dtype=np.float32)
+            self.m = np.array(m, dtype=np.float32)
+            self.s = np.array(s, dtype=np.float32)
             self.d = None  # (!) so we can check if it there
 
         self.tfm_y=tfm_y
@@ -219,11 +219,53 @@ class Normalize():
         else:
 
             m,s = self.m, self.s
-            
-        x = (x-m)/s
+
+        x = (x-m) / s
 
         if self.tfm_y==TfmType.PIXEL and y is not None: y = (y-self.m)/self.s
         return x,y
+
+class Normalize_Leon:
+    """ Does some stuff that I haven't programmed yet. 
+    Normalizes an image to zero mean and unit standard deviation, given the mean m and std s of the original image """
+
+    def __init__(self, stats, tfm_y=TfmType.NO):
+        if isinstance(stats, dict):
+            self.d = stats
+        else:
+            m, s = stats
+            self.m = np.array(m, dtype=np.float32)
+            self.s = np.array(s, dtype=np.float32)
+            self.d = None  # (!) so we can check if it there
+
+        self.tfm_y=tfm_y
+
+    def __call__(self, x, y=None):
+
+
+        x_copy = x
+        dim = np.shape(x)
+        l = dim[0]-1
+        b = dim[1]-1
+        i = 1
+        j = 1
+        for i in range(l):
+            for j in range(b):
+                mat = []
+                pix = x[i,j]
+                mat.append(pix-x[i-1,j]) #left
+                mat.append(pix-x[i+1,j]) #right
+                mat.append(pix-x[i,j+1]) #up
+                mat.append(pix-x[i,j-1]) #down
+                av = 0
+                for k in mat:
+                    av += k
+                av = av/4
+                x_copy[i,j]=av
+        
+
+        return x_copy,y
+            
 
 
 class ChannelOrder():
@@ -511,8 +553,26 @@ class RandomRotate(CoordTransform):
                                         interpolation=cv2.INTER_NEAREST if is_y else cv2.INTER_AREA)
         return x
 
+class AddDimension(CoordTransform): # (!)
 
-class RandomDihedral(CoordTransform):
+    def set_state(self): pass
+
+    def do_transform(self, x, is_y):
+        size = x.shape[0]
+        dim = np.zeros((size, size, 1))
+        out = np.concatenate((x, dim), axis=2)
+        return out
+
+
+class ToCopyTensor(CoordTransform):
+    def set_state(self):pass
+    def do_transform(self, x, is_y):
+        out = torch.from_numpy(x.copy())
+        print("tocopytensor: ",type(out))
+        return out
+
+
+class RandomDihedral(CoordTransform):  # (!)
     """
     Rotates images by random multiples of 90 degrees and/or reflection.
     Please reference D8(dihedral group of order eight), the group of all symmetries of the square.
@@ -697,8 +757,8 @@ class GoogleNetResize(CoordTransform):
 def compose(im, y, fns):
     """ apply a collection of transformation functions fns to images
     """
-    for fn in fns:
 
+    for fn in fns:
         im, y = fn(im, y)
     return im if y is None else (im, y)
 
@@ -815,7 +875,7 @@ def tfms_from_stats_dict(tfms_dict, sz, aug_tfms=None, max_zoom=None, pad=0, cro
                         tfm_y=tfm_y, sz_y=sz_y, scale=scale)
     trn_tfm = image_gen(tfm_norm, tfm_denorm, sz, pad=pad, crop_type=crop_type,
                         tfm_y=tfm_y, sz_y=sz_y, tfms=aug_tfms, max_zoom=max_zoom, pad_mode=pad_mode, scale=scale)
-    return trn_tfm, val_tfm
+    return trn_tfm, val_tfmval_tfm
 
 
 def tfms_from_stats(stats, sz, aug_tfms=None, max_zoom=None, pad=0, crop_type=CropType.RANDOM,
@@ -824,7 +884,7 @@ def tfms_from_stats(stats, sz, aug_tfms=None, max_zoom=None, pad=0, crop_type=Cr
     """
 
     if aug_tfms is None: aug_tfms=[]
-    tfm_norm = Normalize(stats, tfm_y if tfm_y else None) if stats is not None else None
+    tfm_norm = Normalize_Leon(stats, tfm_y if tfm_y else None) if stats is not None else None
     tfm_denorm = Denormalize(stats) if stats is not None else None
     val_crop = CropType.CENTER if crop_type in (CropType.RANDOM,CropType.GOOGLENET) else crop_type
     val_tfm = image_gen(tfm_norm, tfm_denorm, sz, pad=pad, crop_type=val_crop,
